@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Tuntiwiki — Simple GitHub-backed Wiki</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/default.min.css">
+  <style>
+    body{font-family:Inter,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0;background:#f6f8fa;color:#0b0b0b}
+    header{background:#0f1724;color:white;padding:14px 20px}
+    .wrap{display:grid;grid-template-columns:300px 1fr;gap:16px;padding:16px}
+    .panel{background:white;border-radius:8px;padding:12px;box-shadow:0 1px 4px rgba(2,6,23,0.08)}
+    .list{max-height:60vh;overflow:auto}
+    button{background:#0b5fff;color:white;border:none;padding:8px 10px;border-radius:6px;cursor:pointer}
+    input,select,textarea{width:100%;padding:8px;margin:6px 0;border:1px solid #e2e8f0;border-radius:6px}
+    .row{display:flex;gap:8px}
+    .controls{display:flex;gap:8px;align-items:center}
+    .preview{padding:12px}
+    .muted{color:#6b7280;font-size:13px}
+    .danger{color:#9b1c1c}
+    footer{padding:12px;font-size:13px;color:#334155}
+    .small{font-size:13px}
+  </style>
+</head>
+<body>
+  <header>
+    <h2 style="margin:0">Tuntiwiki — GitHub-backed simple wiki</h2>
+    <div style="margin-top:6px;font-size:13px;opacity:0.9">Edit pages & add new pages stored as Markdown files in a GitHub repo</div>
+  </header>
+
+  <div class="wrap">
+    <aside class="panel">
+      <h3>Repository</h3>
+      <label>Owner</label>
+      <input id="owner" placeholder="github-username or org" value="" />
+      <label>Repository</label>
+      <input id="repo" placeholder="repo-name" value="" />
+      <label>Pages path (folder)</label>
+      <input id="path" placeholder="wiki or docs or (empty for root)" value="wiki" />
+      <label>Branch (optional)</label>
+      <input id="branch" placeholder="main (leave empty to use default branch)" />
+
+      <h3 style="margin-top:10px">Authentication (for save)</h3>
+      <div class="muted small">For reading public repos no token is needed. To create/update files you must provide a GitHub Personal Access Token (PAT). Use minimal scopes (public_repo for public repos). Do NOT paste long-term private tokens here if you don't trust the environment.</div>
+      <input id="token" placeholder="Paste PAT here for write (temporary)" />
+
+      <div style="margin-top:10px" class="row">
+        <button id="loadBtn">Load pages</button>
+        <button id="refreshBtn">Refresh list</button>
+      </div>
+
+      <h3 style="margin-top:12px">Pages</h3>
+      <div id="pages" class="list small"></div>
+
+      <hr />
+      <h4>Create new page</h4>
+      <input id="newTitle" placeholder="New page title (no extension)" />
+      <div class="row" style="margin-top:6px">
+        <button id="newBtn">Create page</button>
+        <button id="openBlank">Open blank</button>
+      </div>
+
+      <footer>
+        <div class="muted">Tip: store pages as <code>your-page.md</code> under the chosen folder. The editor will save files as Markdown.</div>
+      </footer>
+    </aside>
+
+    <main>
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <h3 id="pageTitle">(no page loaded)</h3>
+            <div id="breadcrumb" class="muted small">Path: <span id="fullpath">-</span></div>
+          </div>
+          <div class="controls">
+            <input id="commitMsg" placeholder="Commit message (e.g. Update docs)" style="width:320px" />
+            <button id="saveBtn">Save</button>
+            <button id="rawBtn">View raw</button>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+          <div>
+            <label>Editor (Markdown)</label>
+            <textarea id="editor" rows="18" placeholder="# Hello\nWrite in markdown..."></textarea>
+          </div>
+          <div>
+            <label>Preview</label>
+            <div id="preview" class="preview" style="background:#fff;border-radius:6px;min-height:300px;overflow:auto"></div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="panel" style="margin-top:12px">
+        <h4>Actions & Info</h4>
+        <div class="small muted">Use the buttons above to load and edit pages. When saving, provide a commit message and a PAT with repo contents scope if your repo is private. For public repos you can create a PAT with <code>public_repo</code> scope.</div>
+        <pre id="log" class="small" style="background:#0b1220;color:#e6edf3;padding:10px;border-radius:6px;height:120px;overflow:auto"></pre>
+      </div>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    // Simple client-side GitHub-backed wiki
+    const $ = id => document.getElementById(id)
+    let current = {filename:null, sha:null}
+
+    function log(...args){ const p=$('log'); p.textContent += args.join(' ') + '\n'; p.scrollTop = p.scrollHeight }
+
+    function apiUrlOwnerRepo(){
+      const owner = $('owner').value.trim();
+      const repo = $('repo').value.trim();
+      return {owner, repo}
+    }
+
+    async function listPages(){
+      const {owner, repo} = apiUrlOwnerRepo();
+      if(!owner || !repo){alert('Enter owner and repo');return}
+      const path = $('path').value.trim();
+      const url = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path || '')}`;
+      log('Listing', url)
+      try{
+        const res = await fetch(url)
+        if(!res.ok) throw new Error(await res.text())
+        const items = await res.json()
+        const pages = items.filter(it => it.type==='file' && it.name.endsWith('.md'))
+        const container = $('pages'); container.innerHTML=''
+        pages.forEach(p=>{
+          const el = document.createElement('div'); el.style.padding='6px'; el.style.borderBottom='1px solid #f1f5f9'
+          el.innerHTML = `<strong style="cursor:pointer;color:#0b5fff">${p.name.replace(/\.md$/,'')}</strong><div class='muted'>${p.path}</div>`
+          el.querySelector('strong').addEventListener('click', ()=> loadPage(p.path))
+          container.appendChild(el)
+        })
+        if(pages.length===0) container.innerHTML = '<div class="muted">No .md pages found in that folder.</div>'
+      }catch(e){ log('Error listing pages:', e.message); alert('Failed to list pages — check owner/repo/path and rate limits') }
+    }
+
+    async function loadPage(path){
+      const url = `https://api.github.com/repos/${$('owner').value}/${$('repo').value}/contents/${path}`
+      log('Loading', url)
+      try{
+        const res = await fetch(url)
+        if(!res.ok) throw new Error(await res.text())
+        const data = await res.json()
+        const content = decodeURIComponent(escape(atob(data.content.replace(/\n/g,''))))
+        const filename = data.name.replace(/\.md$/,'')
+        current.filename = data.path
+        current.sha = data.sha
+        $('pageTitle').textContent = filename
+        $('fullpath').textContent = data.path
+        $('editor').value = content
+        renderPreview()
+      }catch(e){ log('Error loading page:', e.message); alert('Failed to load page (check path).') }
+    }
+
+    function renderPreview(){
+      const md = $('editor').value
+      $('preview').innerHTML = marked.parse(md)
+    }
+
+    $('editor').addEventListener('input', ()=> renderPreview())
+
+    async function savePage(){
+      const token = $('token').value.trim()
+      if(!token){ if(!confirm('No token provided — you cannot save without a GitHub token. Do you want to continue?')) return }
+      const owner = $('owner').value.trim(), repo = $('repo').value.trim()
+      if(!owner||!repo) { alert('Enter owner and repo'); return }
+      let path = $('path').value.trim();
+      let targetPath = current.filename || (path? `${path}/${$('newTitle').value.trim()||'new-page'}.md` : `${$('newTitle').value.trim()||'new-page'}.md`)
+      if(!targetPath.endsWith('.md')) targetPath += '.md'
+      const message = $('commitMsg').value.trim() || `Update ${targetPath}`
+      const content = $('editor').value
+      const b64 = btoa(unescape(encodeURIComponent(content)))
+      const url = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(targetPath)}`
+      const body = { message, content: b64 }
+      if(current.sha && current.filename === targetPath) body.sha = current.sha
+      if($('branch').value.trim()) body.branch = $('branch').value.trim()
+
+      log('Saving', targetPath)
+      try{
+        const res = await fetch(url, { method:'PUT', headers: { 'Authorization': `token ${token}`, 'Content-Type':'application/json' }, body: JSON.stringify(body) })
+        const j = await res.json()
+        if(!res.ok) throw new Error(j.message || JSON.stringify(j))
+        log('Saved OK at', j.content.path)
+        current.filename = j.content.path
+        current.sha = j.content.sha
+        $('pageTitle').textContent = j.content.name.replace(/\.md$/,'')
+        $('fullpath').textContent = j.content.path
+        alert('Saved successfully!')
+        listPages()
+      }catch(e){ log('Save failed:', e.message); alert('Save failed — check token scope and repo permissions. See log.') }
+    }
+
+    function openBlank(){
+      current.filename = null; current.sha = null
+      $('pageTitle').textContent = '(new page)'
+      $('editor').value = '# New page\nWrite here...'
+      renderPreview()
+    }
+
+    async function createNew(){
+      const title = $('newTitle').value.trim()
+      if(!title) return alert('Enter a title for the new page')
+      current.filename = null; current.sha = null
+      const safe = title.replace(/[^a-zA-Z0-9\-\_]/g,'-')
+      $('pageTitle').textContent = safe
+      $('editor').value = `# ${title}\n\nWrite your page content here...`
+      renderPreview()
+    }
+
+    // Raw view
+    function viewRaw(){
+      if(!current.filename) return alert('No page loaded')
+      const owner = $('owner').value.trim(), repo = $('repo').value.trim()
+      const url = `https://raw.githubusercontent.com/${owner}/${repo}/${$('branch').value || 'main'}/${current.filename}`
+      window.open(url, '_blank')
+    }
+
+    // Event bindings
+    $('loadBtn').addEventListener('click', ()=> listPages())
+    $('refreshBtn').addEventListener('click', ()=> listPages())
+    $('newBtn').addEventListener('click', ()=> createNew())
+    $('openBlank').addEventListener('click', ()=> openBlank())
+    $('saveBtn').addEventListener('click', ()=> savePage())
+    $('rawBtn').addEventListener('click', ()=> viewRaw())
+
+    // On load: render empty preview
+    document.addEventListener('DOMContentLoaded', ()=> renderPreview())
+  </script>
+</body>
+</html>
